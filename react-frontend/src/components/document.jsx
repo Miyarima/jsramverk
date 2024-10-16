@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { io } from "socket.io-client";
+import AddComment from "./comment";
 
 function Document() {
   const [loading, setLoading] = useState(true);
@@ -7,14 +9,68 @@ function Document() {
     title: "",
     content: "",
   });
+  const [caretPosition, setCaretPosition] = useState({ caret: 0, line: 0 });
+  const [comments, setComments] = useState([]);
 
   const { id } = useParams();
   const navigate = useNavigate();
+  const currentPath =
+    process.env.NODE_ENV === "production"
+      ? "https://dida-jogo19-dv1677-h24-lp1-aga5c6ctgsc5h3fj.northeurope-01.azurewebsites.net"
+      : "http://localhost:1337";
+
+  const socketRef = useRef(null);
+
+  const handelSocketUpdate = (update, data) => {
+    const path = update === "socketJoin" ? data.content : data;
+
+    setFormData({
+      title: path.title,
+      content: path.content,
+    });
+  };
+
+  const handelSocketComment = (data) => {
+    if (data.comment) {
+      setComments((prevComments) => [
+        ...prevComments,
+        {
+          comment: data.comment,
+          caret: data.caretPosition.caret,
+          row: data.caretPosition.line,
+        },
+      ]);
+    } else {
+      setComments((prevComments) => [...prevComments, ...data]);
+    }
+  };
 
   useEffect(() => {
-    fetch(
-      `https://dida-jogo19-dv1677-h24-lp1-aga5c6ctgsc5h3fj.northeurope-01.azurewebsites.net/docs/${id}`
-    )
+    socketRef.current = io(currentPath);
+    socketRef.current.emit("create", id);
+
+    socketRef.current.on("serverUpdate", (data) =>
+      handelSocketUpdate("serverUpdate", data)
+    );
+
+    socketRef.current.on("socketJoin", (data) =>
+      handelSocketUpdate("socketJoin", data)
+    );
+
+    socketRef.current.on("newComment", (data) => {
+      handelSocketComment(data);
+    });
+
+    fetch(`${currentPath}/graphql`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        query: `{ document(id: "${id}") { title, content } }`,
+      }),
+    })
       .then((response) => {
         if (!response.ok) {
           throw new Error("An Error has occured");
@@ -23,8 +79,8 @@ function Document() {
       })
       .then((data) => {
         setFormData({
-          title: data.data.title || "",
-          content: data.data.content || "",
+          title: data.data.document.title || "",
+          content: data.data.document.content || "",
         });
         setLoading(false);
       })
@@ -32,11 +88,20 @@ function Document() {
         console.error("Error:", error);
         setLoading(false);
       });
+
+    return () => {
+      socketRef.current.disconnect();
+    };
   }, [id]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
     setFormData({
+      ...formData,
+      [name]: value,
+    });
+
+    socketRef.current.emit("update", {
       ...formData,
       [name]: value,
     });
@@ -46,19 +111,16 @@ function Document() {
     e.preventDefault();
 
     try {
-      const response = await fetch(
-        `https://dida-jogo19-dv1677-h24-lp1-aga5c6ctgsc5h3fj.northeurope-01.azurewebsites.net/docs/update`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            id: id,
-            ...formData,
-          }),
-        }
-      );
+      const response = await fetch(`${currentPath}/graphql`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          query: `mutation { updateDocument(id: "${id}", title: "${formData.title}", content: "${formData.content}") { id } }`,
+        }),
+      });
 
       if (!response.ok) {
         throw new Error("Form submission failed");
@@ -70,6 +132,19 @@ function Document() {
     }
   };
 
+  const handleCarotMove = (e) => {
+    const value = e.target.value;
+    const caretPosition = e.target.selectionStart;
+    const lineNumber = value.substring(0, caretPosition).split("\n").length;
+
+    const caretPositionInLine =
+      lineNumber === 1
+        ? caretPosition
+        : caretPosition - (value.lastIndexOf("\n", caretPosition - 1) + 1);
+
+    setCaretPosition({ caret: caretPositionInLine, line: lineNumber });
+  };
+
   if (loading) {
     return (
       <div className="loading">
@@ -79,12 +154,18 @@ function Document() {
   }
 
   return (
-    <div className="main">
+    <div className="document-bg">
+      <AddComment
+        caretPosition={caretPosition}
+        socketRef={socketRef}
+        newComment={handelSocketComment}
+      />
       <form onSubmit={handleSubmit} className="new-doc">
         <label htmlFor="title">Title</label>
         <input
           type="text"
           name="title"
+          className="title-input"
           value={formData.title}
           onChange={handleChange}
         />
@@ -94,12 +175,24 @@ function Document() {
         <label htmlFor="content">Innehåll</label>
         <textarea
           name="content"
+          className="content-input input-width"
           value={formData.content}
           onChange={handleChange}
+          onClick={handleCarotMove}
         />
 
-        <input type="submit" value="Uppdatera" />
+        <input className="button-create" type="submit" value="Uppdatera" />
       </form>
+      <div>
+        {comments.map((comments, index) => (
+          <div className="comment" key={index}>
+            <h3>
+              Rad {comments.row} | char {comments.caret}
+            </h3>
+            <p>{comments.comment}</p>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
